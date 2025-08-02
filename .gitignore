@@ -1,19 +1,19 @@
 # Python
-   __pycache__/
-   *.pyc
-   *.pyo
-   *.pyd
-   .Python
-   venv/
-   env/
-   *.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+*.env
 
-   # Project-specific
-   cache/
-   reports/
-   stock_analyzer.log
-   *.h5
-   *.pkl
+# Project-specific
+cache/
+reports/
+stock_analyzer.log
+*.h5
+*.pkl
 
-   # macOS
-   .DS_Store
+# macOS
+.DS_Store
