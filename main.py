@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+import os
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -12,9 +14,8 @@ from ta.trend import SMAIndicator, MACD
 from ta.momentum import RSIIndicator
 import joblib
 from textblob import TextBlob
-import os
 import logging
-import hashlib
+import bcrypt
 import re
 from email.mime.text import MIMEText
 import smtplib
@@ -26,6 +27,9 @@ import time
 import mysql.connector
 from PIL import Image
 import base64
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(filename='stock_analyzer.log', level=logging.INFO,
@@ -222,20 +226,24 @@ NIFTY_50 = {
     "Wipro": "WIPRO.NS"
 }
 
-# Database class for user management (Updated for MySQL with verification)
+# Database class for user management
 class UserDB:
     def __init__(self):
         try:
+            required_env_vars = ["MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"]
+            missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+            if missing_vars:
+                raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}")
             self.conn = mysql.connector.connect(
-                host="localhost",
-                user="root",  # Replace with your MySQL username
-                password="D@tabasesql",  # Replace with your MySQL password
-                database="stock_analyzer"
+                host=os.getenv("MYSQL_HOST"),
+                user=os.getenv("MYSQL_USER"),
+                password=os.getenv("MYSQL_PASSWORD"),
+                database=os.getenv("MYSQL_DATABASE")
             )
             self.create_table()
-        except mysql.connector.Error as e:
+        except (mysql.connector.Error, ValueError) as e:
             logging.error(f"Failed to connect to MySQL: {str(e)}")
-            st.error("Database connection failed. Check MySQL settings.")
+            st.error(f"Database connection failed: {str(e)}")
             self.conn = None
 
     def create_table(self):
@@ -257,8 +265,9 @@ class UserDB:
         cursor = self.conn.cursor()
         try:
             pic_data = profile_pic.read() if profile_pic else None
+            hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
             cursor.execute("INSERT INTO users (username, password, email, is_premium, profile_pic, verified) VALUES (%s, %s, %s, %s, %s, %s)",
-                           (username, hash_password(password), email, int(is_premium), pic_data, False))
+                           (username, hashed_password, email, int(is_premium), pic_data, False))
             self.conn.commit()
             cursor.close()
             return True
@@ -290,8 +299,52 @@ class UserDB:
             cursor.close()
             return False
 
+    def update_profile_picture(self, username, profile_pic):
+        if not self.conn:
+            return False
+        cursor = self.conn.cursor()
+        try:
+            pic_data = profile_pic.read() if profile_pic else None
+            cursor.execute("UPDATE users SET profile_pic = %s WHERE username = %s", (pic_data, username))
+            self.conn.commit()
+            cursor.close()
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Profile picture update error: {str(e)}")
+            cursor.close()
+            return False
+
+    def update_email(self, username, email):
+        if not self.conn:
+            return False
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("UPDATE users SET email = %s WHERE username = %s", (email, username))
+            self.conn.commit()
+            cursor.close()
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Email update error: {str(e)}")
+            cursor.close()
+            return False
+
+    def update_password(self, username, password):
+        if not self.conn:
+            return False
+        cursor = self.conn.cursor()
+        try:
+            hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+            cursor.execute("UPDATE users SET password = %s WHERE username = %s", (hashed_password, username))
+            self.conn.commit()
+            cursor.close()
+            return True
+        except mysql.connector.Error as e:
+            logging.error(f"Password update error: {str(e)}")
+            cursor.close()
+            return False
+
     def close(self):
-        if self.conn:
+        if self.conn and self.conn.is_connected():
             self.conn.close()
 
 # Initialize database
@@ -299,7 +352,10 @@ db = UserDB()
 
 # User authentication with enhancements
 def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def check_password(password, hashed):
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 def is_strong_password(password):
     return (len(password) >= 8 and 
@@ -323,7 +379,7 @@ def login():
         if st.form_submit_button("🔑 Login"):
             stored_password, email, is_premium, profile_pic, verified = db.get_user(username)
             if stored_password:
-                if stored_password == hash_password(password):
+                if check_password(password, stored_password):
                     if bypass_verification or verified:
                         st.session_state.logged_in = True
                         st.session_state.username = username
@@ -895,16 +951,10 @@ with tab4:
             new_profile_pic = st.file_uploader("📸 Update Profile Picture", type=["jpg", "png", "jpeg"], key="new_profile_upload")
             if st.form_submit_button("Upload"):
                 if new_profile_pic:
-                    try:
-                        cursor = db.conn.cursor()
-                        pic_data = new_profile_pic.read()
-                        cursor.execute("UPDATE users SET profile_pic = %s WHERE username = %s", (pic_data, st.session_state.username))
-                        db.conn.commit()
-                        cursor.close()
+                    if db.update_profile_picture(st.session_state.username, new_profile_pic):
                         st.success("Profile picture updated successfully! 🎉")
                         st.rerun()
-                    except mysql.connector.Error as e:
-                        logging.error(f"Profile picture update error: {str(e)}")
+                    else:
                         st.error("Failed to update profile picture.")
                 else:
                     st.error("Please select an image to upload.")
@@ -927,15 +977,10 @@ with tab4:
             confirm_password = st.text_input("🔒 Confirm New Password", type="password", placeholder="Confirm new password")
             if st.form_submit_button("💾 Update"):
                 if new_email and new_email != email:
-                    try:
-                        cursor = db.conn.cursor()
-                        cursor.execute("UPDATE users SET email = %s WHERE username = %s", (new_email, st.session_state.username))
-                        db.conn.commit()
-                        cursor.close()
+                    if db.update_email(st.session_state.username, new_email):
                         st.success("Email updated successfully! Please verify your new email.")
                         logging.info(f"User {st.session_state.username} updated email to {new_email}")
-                    except mysql.connector.Error as e:
-                        logging.error(f"Email update error: {str(e)}")
+                    else:
                         st.error("Failed to update email.")
                 if new_password and confirm_password:
                     if new_password != confirm_password:
@@ -943,15 +988,10 @@ with tab4:
                     elif not is_strong_password(new_password):
                         st.error("Password must be at least 8 characters long with uppercase, lowercase, number, and special character.")
                     else:
-                        try:
-                            cursor = db.conn.cursor()
-                            cursor.execute("UPDATE users SET password = %s WHERE username = %s", (hash_password(new_password), st.session_state.username))
-                            db.conn.commit()
-                            cursor.close()
+                        if db.update_password(st.session_state.username, new_password):
                             st.success("Password updated successfully!")
                             logging.info(f"User {st.session_state.username} updated password")
-                        except mysql.connector.Error as e:
-                            logging.error(f"Password update error: {str(e)}")
+                        else:
                             st.error("Failed to update password.")
                 elif new_password or confirm_password:
                     st.error("Please fill both password fields.")
@@ -988,7 +1028,7 @@ with tab4:
             </div>
         """, unsafe_allow_html=True)
         if st.button("🔓 Upgrade to Premium", key="premium_upgrade_profile"):
-            st.info("Unlock advanced features! Visit <a href='https://x.ai/grok' target='_blank'>x.ai/grok</a> for details.", unsafe_allow_html=True)
+            st.info("Premium upgrades coming soon! Contact us for early access.", unsafe_allow_html=True)
 
     # Achievements/Badges
     st.markdown('<div class="card"><h3>Achievements</h3></div>', unsafe_allow_html=True)
@@ -1043,7 +1083,7 @@ with tab5:
     st.markdown('<div class="card"><h3>Buy Premium to Attempt Quizzes <span class="premium" title="Premium Feature">Premium</span></h3><p>Unlock interactive quizzes to test your trading knowledge! Upgrade to Premium for exclusive access to quizzes and advanced tools.</p></div>', unsafe_allow_html=True)
     if not st.session_state.is_premium:
         if st.button("🔓 Upgrade to Premium", key="premium_quiz_button"):
-            st.info("Unlock quizzes and advanced features! Visit <a href='https://x.ai/grok' target='_blank'>x.ai/grok</a> for details.", unsafe_allow_html=True)
+            st.info("Premium upgrades coming soon! Contact us for early access.", unsafe_allow_html=True)
     else:
         st.success("You are a Premium user! Access quizzes below.")
         st.markdown('<div class="card"><p>Coming Soon: Interactive trading quizzes to test your skills!</p></div>', unsafe_allow_html=True)
@@ -1052,11 +1092,14 @@ with tab5:
 st.markdown("""
     <div class='footer'>
         NIFTY AI Stock Pro &copy; 2025 | 
-        <a href='https://x.ai/grok'>Support</a> | 
-        <a href='https://x.ai/grok'>Terms & Conditions</a> | 
-        <a href='https://x.ai/grok'>Privacy Policy</a>
+        <a href='mailto:support@niftyaistockpro.com'>Support</a> | 
+        <a href='https://github.com/Dakshified/nifty-ai-stock-pro'>Terms & Conditions</a> | 
+        <a href='https://github.com/Dakshified/nifty-ai-stock-pro'>Privacy Policy</a>
     </div>
 """, unsafe_allow_html=True)
 
 # Clean up database connection
-db.close()
+try:
+    db.close()
+except Exception as e:
+    logging.error(f"Error closing database connection: {str(e)}")
